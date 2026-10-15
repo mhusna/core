@@ -1,0 +1,95 @@
+name: Deployment impact analysis
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-impact-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze business impact
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate repository configuration
+        env:
+          BUSINESS_REPOSITORY: ${{ vars.BUSINESS_REPOSITORY }}
+          ANALYZER_REPOSITORY: ${{ vars.ANALYZER_REPOSITORY }}
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+        run: |
+          test -n "$BUSINESS_REPOSITORY" || { echo "Set the BUSINESS_REPOSITORY Actions variable."; exit 1; }
+          test -n "$ANALYZER_REPOSITORY" || { echo "Set the ANALYZER_REPOSITORY Actions variable."; exit 1; }
+          test -n "$AZURE_OPENAI_ENDPOINT" || { echo "Set the AZURE_OPENAI_ENDPOINT Actions secret."; exit 1; }
+          test -n "$AZURE_OPENAI_API_KEY" || { echo "Set the AZURE_OPENAI_API_KEY Actions secret."; exit 1; }
+          test -n "$AZURE_OPENAI_DEPLOYMENT" || { echo "Set the AZURE_OPENAI_DEPLOYMENT Actions variable."; exit 1; }
+
+      - name: Check out core project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out business project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.BUSINESS_REPOSITORY }}
+          ref: ${{ vars.BUSINESS_BASE_REF || 'main' }}
+          path: business
+          persist-credentials: false
+
+      - name: Check out analyzer
+        env:
+          ANALYZER_REPOSITORY: ${{ vars.ANALYZER_REPOSITORY }}
+        run: git clone --depth 1 "https://github.com/${ANALYZER_REPOSITORY}.git" impact-checker
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install analyzer
+        run: python -m pip install ./impact-checker
+
+      - name: Analyze impact
+        env:
+          AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT }}
+          BASE_SHA: ${{ github.event.before || format('{0}^', github.sha) }}
+        run: >-
+          python -m deployment_impact
+          --core-repo .
+          --business-repo business
+          --base "$BASE_SHA"
+          --report impact-report.md
+
+      - name: Add report to workflow summary
+        if: always() && hashFiles('impact-report.md') != ''
+        run: cat impact-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always() && hashFiles('impact-report.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-impact-report
+          path: impact-report.md
+          if-no-files-found: error
+          retention-days: 14
+
+  demo-deployment:
+    name: Demo deployment placeholder
+    needs: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark analysis gate
+        run: echo "Impact analysis succeeded; replace this step with the real deployment."
